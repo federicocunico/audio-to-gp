@@ -1,9 +1,18 @@
-__pycache__/
-*.pyc
-*.pyo
+# Build output
+dist/
+audio_to_gp_flutter/build/
 
+# Flutter / Dart
+audio_to_gp_flutter/.dart_tool/
+audio_to_gp_flutter/.flutter-plugins
+audio_to_gp_flutter/.flutter-plugins-dependencies
+audio_to_gp_flutter/pubspec.lock
+
+# Test fixtures (large media files)
+audio_to_gp_flutter/test/fixtures/*.mp3
+audio_to_gp_flutter/test/fixtures/*.wav
+
+# Media / pipeline data
 *.mp3
-output/
 input/
-
-.venv/
+output/

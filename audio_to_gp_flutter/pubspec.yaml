@@ -1,0 +1,56 @@
+name: audio_to_gp_flutter
+description: "Audio to Guitar Pro — desktop app converting MP3 to GP5 via demucs + basic-pitch."
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.11.4
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # File & path utilities
+  file_picker: ^8.1.7
+  path_provider: ^2.1.5
+  path: ^1.9.1
+
+  # Networking & archive
+  http: ^1.2.2
+  archive: ^3.6.1
+
+  # State management
+  flutter_riverpod: ^2.6.1
+  riverpod_annotation: ^2.6.1
+
+  # Audio playback (desktop-compatible)
+  audioplayers: ^6.4.0
+
+  # Charts
+  fl_chart: ^0.69.2
+
+  # Shared preferences (setup state persistence)
+  shared_preferences: ^2.3.3
+
+  # URL launcher (open MuseScore download page)
+  url_launcher: ^6.3.1
+
+  cupertino_icons: ^1.0.8
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+  integration_test:
+    sdk: flutter
+
+  flutter_lints: ^5.0.0
+  build_runner: ^2.4.13
+  riverpod_generator: ^2.6.1
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/python/
+
