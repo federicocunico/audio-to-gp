@@ -1,0 +1,80 @@
+# Audio-to-Sheet-Music — Docker Compose
+#
+# Usage
+# ─────
+# Start Streamlit UI (default):
+#   docker compose up --build
+#   → open http://localhost:8501
+#
+# Run headless CLI on a local MP3:
+#   docker compose run --rm pipeline \
+#     python pipeline.py --input /data/song.mp3
+#
+# Override the demucs model or stems:
+#   docker compose run --rm pipeline \
+#     python pipeline.py --input /data/song.mp3 --model htdemucs_6s \
+#                        --stems bass,vocals,guitar
+#
+# Notes
+# ─────
+# - model-cache volume persists demucs weights (~300 MB, downloaded on first run).
+# - ./output  is bind-mounted so generated files are accessible on the host.
+# - ./input   is bind-mounted as read-only; place MP3 files there for CLI use.
+
+services:
+
+  # ── Streamlit web UI ───────────────────────────────────────────────────────
+  streamlit:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        MSCORE_BUILD: "4.6.5.253511702"
+        MSCORE_TAG:   "v4.6.5"
+    image: audio-to-gp:latest
+    pull_policy: build
+    container_name: audio-to-gp-ui
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./output:/app/output          # generated stems / MIDI / PDFs on host
+      - model-cache:/app/.cache       # demucs + onnx model weights (persisted)
+    environment:
+      PYTHONUTF8:          "1"
+      QT_QPA_PLATFORM:     offscreen
+      TORCH_HOME:          /app/.cache/torch
+      XDG_CACHE_HOME:      /app/.cache
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout:  10s
+      retries:  5
+      start_period: 120s    # allow time for first-run model download
+
+  # ── Headless CLI (batch / automation) ─────────────────────────────────────
+  # docker compose run --rm pipeline python pipeline.py --input /data/song.mp3
+  pipeline:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: audio-to-gp:latest    # shares the built image with the streamlit service
+    pull_policy: build
+    volumes:
+      - ./output:/app/output
+      - ./input:/data:ro              # place MP3 files in ./input/ on the host
+      - model-cache:/app/.cache
+    environment:
+      PYTHONUTF8:          "1"
+      QT_QPA_PLATFORM:     offscreen
+      TORCH_HOME:          /app/.cache/torch
+      XDG_CACHE_HOME:      /app/.cache
+    # No default command — always specify via `docker compose run`
+    entrypoint: ["uv", "run"]
+    profiles:
+      - cli   # only started explicitly; doesn't launch with `docker compose up`
+
+# ── Named volumes ─────────────────────────────────────────────────────────────
+volumes:
+  model-cache:
+    driver: local

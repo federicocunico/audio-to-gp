@@ -1,0 +1,40 @@
+[project]
+name = "audio-to-gp"
+version = "0.1.0"
+description = "Headless Audio-to-Sheet-Music pipeline: MP3 → stems → MIDI → PDF/MusicXML"
+requires-python = ">=3.10, <3.12"
+dependencies = [
+    "demucs",
+    "basic-pitch[onnx]",
+    # Pin torch/torchaudio to <2.4 to avoid the torchcodec mandatory backend
+    # introduced in 2.4+ (torchcodec requires FFmpeg shared DLLs on Windows).
+    # torchaudio <2.4 uses soundfile as the default WAV backend instead.
+    "torch>=2.1,<2.4",
+    "torchaudio>=2.1,<2.4",
+    "soundfile>=0.12",
+    "streamlit>=1.35",
+    "plotly>=5.20",
+    "librosa>=0.10",
+    "mido>=1.3",
+    "PyGuitarPro>=0.6",
+]
+
+[tool.uv]
+# tensorflow-io-gcs-filesystem has no Windows wheels; TF on Windows doesn't need it
+override-dependencies = [
+    "tensorflow-io-gcs-filesystem; sys_platform != 'win32'",
+]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu121", marker = "platform_system == 'Windows' or platform_system == 'Linux'" },
+]
+torchaudio = [
+    { index = "pytorch-cu121", marker = "platform_system == 'Windows' or platform_system == 'Linux'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu121"
+url = "https://download.pytorch.org/whl/cu121"
+explicit = true
+
