@@ -30,9 +30,11 @@ import importlib.util
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 
@@ -55,10 +57,11 @@ def _error(step: int, msg: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Subprocess runner
+# Subprocess runners
 # ---------------------------------------------------------------------------
 
 def _run(cmd: list[str], step: int, step_name: str) -> None:
+    """Run cmd, capture stdout+stderr; raise on non-zero exit."""
     env = os.environ.copy()
     env["PYTHONUTF8"] = "1"
     result = subprocess.run(
@@ -74,6 +77,64 @@ def _run(cmd: list[str], step: int, step_name: str) -> None:
         _error(step, f"{step_name} failed (exit {result.returncode}): {detail[:500]}")
 
 
+_TQDM_PCT_RE = re.compile(r'(\d{1,3})%\|')
+
+
+def _run_demucs(
+    cmd: list[str],
+    step: int,
+    step_name: str,
+    pct_start: int = 5,
+    pct_end: int = 95,
+) -> None:
+    """Run demucs, stream stderr for tqdm progress, emit step events."""
+    env = os.environ.copy()
+    env["PYTHONUTF8"] = "1"
+    # Force tqdm to write output even when stderr is a pipe.
+    env["TQDM_DISABLE"] = "0"
+    env["TQDM_MININTERVAL"] = "2"   # emit at most one update per 2 s
+    env["TQDM_NCOLS"] = "60"        # fixed width → simpler output
+
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+    )
+
+    stderr_lines: list[str] = []
+
+    def _read_stderr() -> None:
+        assert proc.stderr is not None
+        for raw in proc.stderr:
+            # tqdm overwrites lines with \r; split on both \r and \n
+            for part in re.split(r'[\r\n]+', raw):
+                part = part.strip()
+                if not part:
+                    continue
+                stderr_lines.append(part)
+                m = _TQDM_PCT_RE.search(part)
+                if m:
+                    raw_pct = int(m.group(1))
+                    scaled = pct_start + int((pct_end - pct_start) * raw_pct / 100)
+                    _progress(step, scaled, part)
+
+    t = threading.Thread(target=_read_stderr, daemon=True)
+    t.start()
+
+    # Consume stdout so the process is not blocked by a full pipe buffer.
+    stdout_out = proc.stdout.read() if proc.stdout else ""
+    proc.wait()
+    t.join(timeout=15)
+
+    if proc.returncode != 0:
+        detail = "\n".join(stderr_lines[-15:]) or stdout_out
+        _error(step, f"{step_name} failed (exit {proc.returncode}): {detail[:500]}")
+
+
 # ---------------------------------------------------------------------------
 # Step 1 — Source separation (demucs)
 # ---------------------------------------------------------------------------
@@ -87,7 +148,8 @@ def step1_demucs(input_mp3: Path, stems_dir: Path, model: str) -> Path:
         "--out", str(stems_dir),
         str(input_mp3),
     ]
-    _run(cmd, 1, "demucs")
+    # Use streaming runner so tqdm ▶ Flutter progress bar in real time.
+    _run_demucs(cmd, 1, "demucs", pct_start=5, pct_end=95)
 
     stem_folder = stems_dir / model / input_mp3.stem
     if not stem_folder.exists():
@@ -110,9 +172,23 @@ def step2_basic_pitch(
 ) -> dict[str, str]:
     _progress(2, 0, "Starting basic-pitch…")
 
-    basic_pitch_bin = shutil.which("basic-pitch")
+    # Prefer the entry-point next to the running interpreter (venv/Scripts/)
+    # so we don't depend on PATH being set correctly.
+    venv_scripts = Path(sys.executable).parent
+    for candidate_name in ("basic-pitch", "basic-pitch.exe", "basic_pitch", "basic_pitch.exe"):
+        candidate = venv_scripts / candidate_name
+        if candidate.exists():
+            basic_pitch_bin = str(candidate)
+            break
+    else:
+        basic_pitch_bin = shutil.which("basic-pitch") or shutil.which("basic_pitch")
+
     if not basic_pitch_bin:
-        _error(2, "basic-pitch CLI not found in PATH.")
+        _error(2, (
+            "basic-pitch CLI not found. Expected it at "
+            f"{venv_scripts / 'basic-pitch'} — "
+            "re-run setup to reinstall dependencies."
+        ))
 
     wav_files = sorted(stem_folder.glob("*.wav"))
     if not wav_files:

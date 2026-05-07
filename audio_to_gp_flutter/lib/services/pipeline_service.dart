@@ -88,8 +88,11 @@ class PipelineService {
       environment: {
         ...Platform.environment,
         'PYTHONUTF8': '1',
-        // Add FFmpeg and uv to PATH so demucs and basic-pitch can find them
-        'PATH': '${p.dirname(paths.ffmpegExe)};${Platform.environment['PATH'] ?? ''}',
+        // Add the venv Scripts dir first so `basic-pitch` (and any other
+        // venv-installed entry-points) resolve correctly, then FFmpeg.
+        'PATH': '${p.dirname(paths.pythonExe)};'
+            '${p.dirname(paths.ffmpegExe)};'
+            '${Platform.environment['PATH'] ?? ''}',
       },
     );
 

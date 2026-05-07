@@ -4,6 +4,7 @@
 /// Progress is reported via [Stream<SetupEvent>].
 library;
 
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -30,13 +31,15 @@ class SetupEvent {
     required this.stage,
     required this.message,
     this.pct = 0,
+    this.subPct, // 0–100 within the current stage; null = indeterminate
     this.isError = false,
     this.isDone = false,
   });
 
   final SetupStage stage;
   final String message;
-  final int pct; // 0–100
+  final int pct; // overall stage bucket (kept for back-compat)
+  final int? subPct;
   final bool isError;
   final bool isDone;
 
@@ -132,6 +135,11 @@ class SetupService {
     final toolsDir = await _toolsDir();
     await Directory(toolsDir).create(recursive: true);
 
+    // Keep uv-managed Python inside the app's own tools directory so nothing
+    // is scattered across the user's C: drive.
+    final pythonInstallDir = p.join(toolsDir, 'python');
+    final uvPythonEnv = {'UV_PYTHON_INSTALL_DIR': pythonInstallDir};
+
     // --- Step 1: uv ---
     final uvExe = p.join(toolsDir, 'uv', 'uv.exe');
     if (!File(uvExe).existsSync()) {
@@ -179,11 +187,13 @@ class SetupService {
         pct: 0,
       );
       try {
-        yield* _runUv(uvExe, ['python', 'install', '3.11'], SetupStage.python);
+        yield* _runUv(uvExe, ['python', 'install', '3.11'], SetupStage.python,
+            extraEnv: uvPythonEnv);
         yield* _runUv(
           uvExe,
           ['venv', '--python', '3.11', venvDir],
           SetupStage.python,
+          extraEnv: uvPythonEnv,
         );
       } catch (e) {
         yield SetupEvent(
@@ -224,10 +234,45 @@ class SetupService {
         pct: 5,
       );
       try {
+        // Detect CUDA at runtime so we install the right PyTorch variant.
+        final cudaAvailable = await _hasCuda();
+        final torchIndexUrl = cudaAvailable
+            ? 'https://download.pytorch.org/whl/cu121'
+            : 'https://download.pytorch.org/whl/cpu';
+        yield SetupEvent(
+          stage: SetupStage.pythonDeps,
+          message: cudaAvailable
+              ? 'CUDA GPU detected — installing GPU-enabled PyTorch from $torchIndexUrl…'
+              : 'No CUDA GPU detected — installing CPU-only PyTorch…',
+          pct: 8,
+        );
+
+        // Step A: torch + torchaudio from the correct index.
+        // Using --index-url (not --extra-index-url) so uv fetches torch
+        // exclusively from the PyTorch wheel server, avoiding the CPU build
+        // on PyPI.
         yield* _runUv(
           uvExe,
-          ['pip', 'install', '--project', toolsDir, '--python', pythonExe, '-r', pyprojectDest],
+          [
+            'pip', 'install',
+            'torch>=2.1,<2.4', 'torchaudio>=2.1,<2.4',
+            '--index-url', torchIndexUrl,
+            '--python', pythonExe,
+          ],
           SetupStage.pythonDeps,
+          extraEnv: uvPythonEnv,
+        );
+
+        // Step B: remaining deps from PyPI (torch already installed above).
+        yield* _runUv(
+          uvExe,
+          [
+            'pip', 'install',
+            'demucs', 'basic-pitch[onnx]', 'soundfile>=0.12',
+            '--python', pythonExe,
+          ],
+          SetupStage.pythonDeps,
+          extraEnv: uvPythonEnv,
         );
         await depsMarker.writeAsString(DateTime.now().toIso8601String());
       } catch (e) {
@@ -337,55 +382,140 @@ class SetupService {
   }
 
   /// Download a zip file and extract it to [destDir].
+  /// Emits subPct 0–49 during download, 50–100 during extraction.
   Stream<SetupEvent> _downloadAndExtract({
     required String url,
     required String destDir,
     required SetupStage stage,
     required String label,
   }) async* {
-    yield SetupEvent(stage: stage, message: 'Downloading $label…', pct: 10);
+    yield SetupEvent(stage: stage, message: 'Connecting to $label download…', subPct: 0);
 
-    final response = await http.get(Uri.parse(url));
-    if (response.statusCode != 200) {
-      throw Exception('HTTP ${response.statusCode} for $url');
+    final client = http.Client();
+    try {
+      final request = http.Request('GET', Uri.parse(url));
+      final response = await client.send(request);
+      if (response.statusCode != 200) {
+        throw Exception('HTTP ${response.statusCode} for $url');
+      }
+
+      final totalBytes = response.contentLength ?? 0;
+      var receivedBytes = 0;
+      final buffer = BytesBuilder(copy: false);
+      int lastSp = -1;
+
+      await for (final chunk in response.stream) {
+        buffer.add(chunk);
+        receivedBytes += chunk.length;
+        if (totalBytes > 0) {
+          // Map download phase to subPct 0–49
+          final sp = (receivedBytes / totalBytes * 49).round().clamp(0, 49);
+          if (sp != lastSp) {
+            lastSp = sp;
+            final rcvMB = (receivedBytes / 1048576).toStringAsFixed(1);
+            final totMB = (totalBytes / 1048576).toStringAsFixed(1);
+            yield SetupEvent(
+              stage: stage,
+              message: 'Downloading $label — $rcvMB / $totMB MB',
+              subPct: sp,
+            );
+          }
+        }
+      }
+
+      yield SetupEvent(stage: stage, message: 'Extracting $label…', subPct: 60);
+      final archive = ZipDecoder().decodeBytes(buffer.toBytes());
+      await Directory(destDir).create(recursive: true);
+      await extractArchiveToDisk(archive, destDir);
+      yield SetupEvent(stage: stage, message: '$label ready.', subPct: 100);
+    } finally {
+      client.close();
     }
-
-    yield SetupEvent(stage: stage, message: 'Extracting $label…', pct: 60);
-
-    final archive = ZipDecoder().decodeBytes(response.bodyBytes);
-    await Directory(destDir).create(recursive: true);
-    await extractArchiveToDisk(archive, destDir);
-
-    yield SetupEvent(stage: stage, message: '$label extracted.', pct: 100);
   }
 
-  /// Run a uv command and stream its output as SetupEvents.
+  /// Returns true if nvidia-smi is available and exits successfully,
+  /// indicating at least one CUDA-capable GPU is present.
+  Future<bool> _hasCuda() async {
+    try {
+      final result = await Process.run('nvidia-smi', []);
+      return result.exitCode == 0;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Run a uv command and stream its output as [SetupEvent]s in real-time.
+  ///
+  /// Both stdout and stderr are interleaved via a polling loop so progress
+  /// messages (which uv sends to stderr) appear without waiting for the
+  /// process to finish.  Output is parsed to derive [SetupEvent.subPct]:
+  ///   • "Resolved N packages" → 5 %
+  ///   • Each "Downloading …"  → 5–80 % (proportional to package count)
+  ///   • "Prepared …"          → 82 %
+  ///   • "Installed …"         → 100 %
   Stream<SetupEvent> _runUv(
     String uvExe,
     List<String> args,
-    SetupStage stage,
-  ) async* {
+    SetupStage stage, {
+    Map<String, String> extraEnv = const {},
+  }) async* {
+    final pending = <SetupEvent>[];
+    var totalPkgs = 0;
+    var donePkgs = 0;
+
     final process = await Process.start(
       uvExe,
       args,
       environment: {
         ...Platform.environment,
         'PYTHONUTF8': '1',
+        // Suppress ANSI codes and spinner so output is clean plain text.
+        'UV_NO_PROGRESS': '1',
+        'NO_COLOR': '1',
+        ...extraEnv,
       },
     );
 
-    await for (final line in process.stdout
-        .transform(utf8.decoder)
-        .transform(const LineSplitter())) {
-      yield SetupEvent(stage: stage, message: line);
-    }
-    await for (final line in process.stderr
-        .transform(utf8.decoder)
-        .transform(const LineSplitter())) {
-      yield SetupEvent(stage: stage, message: line);
+    void onLine(String raw) {
+      final line = raw.trim();
+      if (line.isEmpty) return;
+      int? subPct;
+
+      final rm = RegExp(r'Resolved (\d+) packages?').firstMatch(line);
+      if (rm != null) {
+        totalPkgs = int.tryParse(rm.group(1)!) ?? 0;
+        subPct = 5;
+      }
+      if (line.startsWith('Downloading ') && totalPkgs > 0) {
+        donePkgs++;
+        subPct = (5 + donePkgs / totalPkgs * 75).round().clamp(5, 80);
+      }
+      if (line.startsWith('Prepared ')) subPct = 82;
+      if (line.startsWith('Installed ') || line.startsWith('Audited ')) subPct = 100;
+
+      pending.add(SetupEvent(stage: stage, message: line, subPct: subPct));
     }
 
-    final exitCode = await process.exitCode;
+    final stdoutFuture = process.stdout
+        .transform(utf8.decoder)
+        .transform(const LineSplitter())
+        .forEach(onLine);
+    final stderrFuture = process.stderr
+        .transform(utf8.decoder)
+        .transform(const LineSplitter())
+        .forEach(onLine);
+
+    final exitCompleter = Completer<int>();
+    process.exitCode.then(exitCompleter.complete);
+
+    while (!exitCompleter.isCompleted) {
+      while (pending.isNotEmpty) yield pending.removeAt(0);
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+    }
+    await Future.wait([stdoutFuture, stderrFuture]);
+    while (pending.isNotEmpty) yield pending.removeAt(0);
+
+    final exitCode = await exitCompleter.future;
     if (exitCode != 0) {
       throw Exception('uv ${args.join(' ')} exited with $exitCode');
     }

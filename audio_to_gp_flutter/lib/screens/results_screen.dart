@@ -222,6 +222,13 @@ class _ModelResultCardState extends State<_ModelResultCard> {
             ),
           ),
 
+          // ── Live progress (while running) ─────────────────────────────
+          if (!widget.isDone && !widget.hasError && widget.log.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+              child: _PipelineProgress(log: widget.log),
+            ),
+
           if (result != null) ...[
             // GP5 download button
             Padding(
@@ -284,6 +291,92 @@ class _ModelResultCardState extends State<_ModelResultCard> {
             ),
         ],
       ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Pipeline progress widget
+// ---------------------------------------------------------------------------
+
+class _PipelineProgress extends StatelessWidget {
+  const _PipelineProgress({required this.log});
+  final List<PipelineEvent> log;
+
+  static const _stepLabels = {
+    1: 'Separating stems (demucs)',
+    2: 'Transcribing MIDI (basic-pitch)',
+    3: 'Writing Guitar Pro file',
+  };
+
+  /// Maps step + pct to an overall 0.0–1.0 progress value.
+  static double _overall(int step, int pct) {
+    // Step 1: 0–60%, step 2: 60–90%, step 3: 90–100%
+    if (step == 1) return pct * 0.60 / 100;
+    if (step == 2) return 0.60 + pct * 0.30 / 100;
+    if (step == 3) return 0.90 + pct * 0.10 / 100;
+    return 0;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (log.isEmpty) return const SizedBox.shrink();
+    final last = log.last;
+    final stepLabel = _stepLabels[last.step] ?? 'Processing…';
+    final overall = _overall(last.step, last.pct);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // Step label + step-level percentage
+        Row(
+          children: [
+            Text(
+              'Step ${last.step}/3: $stepLabel',
+              style: const TextStyle(color: Colors.white54, fontSize: 12),
+            ),
+            const Spacer(),
+            Text(
+              '${last.pct}%',
+              style: const TextStyle(color: Colors.white38, fontSize: 11),
+            ),
+          ],
+        ),
+        const SizedBox(height: 4),
+        // Step-level bar (blue)
+        ClipRRect(
+          borderRadius: BorderRadius.circular(3),
+          child: LinearProgressIndicator(
+            value: last.pct / 100,
+            minHeight: 5,
+            backgroundColor: Colors.white10,
+            color: Colors.blueAccent,
+          ),
+        ),
+        const SizedBox(height: 6),
+        // Overall bar (purple)
+        ClipRRect(
+          borderRadius: BorderRadius.circular(4),
+          child: LinearProgressIndicator(
+            value: overall,
+            minHeight: 7,
+            backgroundColor: Colors.white10,
+            color: Colors.deepPurpleAccent,
+          ),
+        ),
+        const SizedBox(height: 5),
+        // Latest message
+        Text(
+          last.message,
+          style: const TextStyle(
+            color: Colors.white38,
+            fontSize: 11,
+            fontFamily: 'monospace',
+          ),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
+      ],
     );
   }
 }

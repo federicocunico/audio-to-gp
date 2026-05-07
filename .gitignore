@@ -16,3 +16,5 @@ audio_to_gp_flutter/test/fixtures/*.wav
 *.mp3
 input/
 output/
+
+audio_to_gp_output/
