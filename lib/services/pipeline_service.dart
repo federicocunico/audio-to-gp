@@ -90,8 +90,10 @@ class PipelineService {
         'PYTHONUTF8': '1',
         // Add the venv Scripts dir first so `basic-pitch` (and any other
         // venv-installed entry-points) resolve correctly, then FFmpeg.
-        'PATH': '${p.dirname(paths.pythonExe)};'
-            '${p.dirname(paths.ffmpegExe)};'
+        'PATH': '${p.dirname(paths.pythonExe)}'
+            '${Platform.isWindows ? ';' : ':'}'
+            '${p.dirname(paths.ffmpegExe)}'
+            '${Platform.isWindows ? ';' : ':'}'
             '${Platform.environment['PATH'] ?? ''}',
       },
     );

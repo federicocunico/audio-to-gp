@@ -94,18 +94,43 @@ class SetupService {
 
   // ---- Download URLs -------------------------------------------------------
 
-  static const _kUvUrl =
-      'https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-pc-windows-msvc.zip';
+  static Future<String> _getUvDownloadUrl() async {
+    if (Platform.isWindows) {
+      return 'https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-pc-windows-msvc.zip';
+    } else if (Platform.isMacOS) {
+      final result = await Process.run('uname', ['-m']);
+      final arch = (result.stdout as String).trim();
+      final uvArch = arch == 'arm64' ? 'aarch64' : 'x86_64';
+      return 'https://github.com/astral-sh/uv/releases/latest/download/uv-$uvArch-apple-darwin.tar.gz';
+    }
+    throw UnsupportedError('Unsupported platform: ${Platform.operatingSystem}');
+  }
 
-  static const _kFfmpegUrl =
-      'https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/'
-      'ffmpeg-master-latest-win64-gpl-shared.zip';
+  static Future<String> _getFfmpegDownloadUrl() async {
+    if (Platform.isWindows) {
+      return 'https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/'
+          'ffmpeg-master-latest-win64-gpl-shared.zip';
+    } else if (Platform.isMacOS) {
+      return 'https://evermeet.cx/ffmpeg/getrelease/zip';
+    }
+    throw UnsupportedError('Unsupported platform: ${Platform.operatingSystem}');
+  }
 
-  static const _kMuseScoreDefaultPaths = [
-    r'C:\Program Files\MuseScore 4\bin\MuseScore4.exe',
-    r'C:\Program Files\MuseScore4\bin\MuseScore4.exe',
-    r'C:\Program Files (x86)\MuseScore 4\bin\MuseScore4.exe',
-  ];
+  static List<String> get _kMuseScoreDefaultPaths {
+    if (Platform.isWindows) {
+      return [
+        r'C:\Program Files\MuseScore 4\bin\MuseScore4.exe',
+        r'C:\Program Files\MuseScore4\bin\MuseScore4.exe',
+        r'C:\Program Files (x86)\MuseScore 4\bin\MuseScore4.exe',
+      ];
+    } else if (Platform.isMacOS) {
+      return [
+        '/Applications/MuseScore 4.app/Contents/MacOS/mscore',
+        '/Applications/MuseScore4.app/Contents/MacOS/mscore',
+      ];
+    }
+    return [];
+  }
 
   static const _kMuseScoreDownloadUrl =
       'https://musescore.org/en/download';
@@ -163,7 +188,8 @@ class SetupService {
     final uvPythonEnv = {'UV_PYTHON_INSTALL_DIR': pythonInstallDir};
 
     // --- Step 1: uv ---
-    final uvExe = p.join(toolsDir, 'uv', 'uv.exe');
+    final uvBinName = Platform.isWindows ? 'uv.exe' : 'uv';
+    final uvExe = p.join(toolsDir, 'uv', uvBinName);
     if (!File(uvExe).existsSync()) {
       yield SetupEvent(
         stage: SetupStage.uv,
@@ -171,12 +197,21 @@ class SetupService {
         pct: 0,
       );
       try {
+        final uvUrl = await _getUvDownloadUrl();
         yield* _downloadAndExtract(
-          url: _kUvUrl,
+          url: uvUrl,
           destDir: p.join(toolsDir, 'uv'),
           stage: SetupStage.uv,
           label: 'uv',
         );
+        // On macOS the tar.gz extracts into a subdirectory; promote the binary.
+        if (!Platform.isWindows) {
+          final found = _findBinaryInDir(Directory(p.join(toolsDir, 'uv')), uvBinName);
+          if (found != null && found != uvExe) {
+            await File(found).copy(uvExe);
+            await _setExecutable(uvExe);
+          }
+        }
       } catch (e) {
         yield SetupEvent(
           stage: SetupStage.uv,
@@ -192,7 +227,7 @@ class SetupService {
     if (!File(uvExe).existsSync()) {
       yield SetupEvent(
         stage: SetupStage.uv,
-        message: 'uv.exe not found after extraction.',
+        message: 'uv binary not found after extraction.',
         isError: true,
       );
       return;
@@ -200,7 +235,9 @@ class SetupService {
 
     // --- Step 2: Python 3.11 via uv ---
     final venvDir = p.join(toolsDir, '.venv');
-    final pythonExe = p.join(venvDir, 'Scripts', 'python.exe');
+    final pythonExe = Platform.isWindows
+        ? p.join(venvDir, 'Scripts', 'python.exe')
+        : p.join(venvDir, 'bin', 'python3');
 
     if (!File(pythonExe).existsSync()) {
       yield SetupEvent(
@@ -367,7 +404,10 @@ class SetupService {
     }
 
     // --- Step 4: FFmpeg ---
-    final ffmpegLocal = p.join(toolsDir, 'ffmpeg', 'bin', 'ffmpeg.exe');
+    final ffmpegBinName = Platform.isWindows ? 'ffmpeg.exe' : 'ffmpeg';
+    final ffmpegLocal = Platform.isWindows
+        ? p.join(toolsDir, 'ffmpeg', 'bin', 'ffmpeg.exe')
+        : p.join(toolsDir, 'ffmpeg', 'ffmpeg');
     late final String ffmpegExe;
 
     if (File(ffmpegLocal).existsSync()) {
@@ -378,7 +418,7 @@ class SetupService {
         pct: 100,
       );
     } else {
-      final pathFfmpeg = await _findInPath('ffmpeg');
+      final pathFfmpeg = await _findInPath(ffmpegBinName);
       if (pathFfmpeg != null) {
         ffmpegExe = pathFfmpeg;
         yield SetupEvent(
@@ -393,17 +433,21 @@ class SetupService {
           pct: 0,
         );
         try {
+          final ffmpegUrl = await _getFfmpegDownloadUrl();
           yield* _downloadAndExtract(
-            url: _kFfmpegUrl,
+            url: ffmpegUrl,
             destDir: p.join(toolsDir, 'ffmpeg_raw'),
             stage: SetupStage.ffmpeg,
             label: 'FFmpeg',
           );
-          // The zip contains a top-level versioned folder; find and move it.
+          // On Windows the zip has a versioned subfolder; flatten it.
           await _flattenFfmpegDir(
             p.join(toolsDir, 'ffmpeg_raw'),
             p.join(toolsDir, 'ffmpeg'),
           );
+          if (!Platform.isWindows) {
+            await _setExecutable(ffmpegLocal);
+          }
         } catch (e) {
           yield SetupEvent(
             stage: SetupStage.ffmpeg,
@@ -415,7 +459,7 @@ class SetupService {
         if (!File(ffmpegLocal).existsSync()) {
           yield SetupEvent(
             stage: SetupStage.ffmpeg,
-            message: 'ffmpeg.exe not found after extraction.',
+            message: 'ffmpeg not found after extraction.',
             isError: true,
           );
           return;
@@ -533,9 +577,16 @@ class SetupService {
       }
 
       yield SetupEvent(stage: stage, message: 'Extracting $label…', subPct: 60);
-      final archive = ZipDecoder().decodeBytes(buffer.toBytes());
       await Directory(destDir).create(recursive: true);
-      await extractArchiveToDisk(archive, destDir);
+      final bytes = buffer.toBytes();
+      if (url.endsWith('.tar.gz') || url.endsWith('.tgz')) {
+        final decompressed = GZipDecoder().decodeBytes(bytes);
+        final archive = TarDecoder().decodeBytes(decompressed);
+        await extractArchiveToDisk(archive, destDir);
+      } else {
+        final archive = ZipDecoder().decodeBytes(bytes);
+        await extractArchiveToDisk(archive, destDir);
+      }
       yield SetupEvent(stage: stage, message: '$label ready.', subPct: 100);
     } finally {
       client.close();
@@ -652,10 +703,11 @@ class SetupService {
   }
 
   /// Returns the full resolved path to [executable] if it exists on the
-  /// system PATH (via `where.exe`), or null if not found.
+  /// system PATH, or null if not found.
   Future<String?> _findInPath(String executable) async {
     try {
-      final result = await Process.run('where.exe', [executable]);
+      final finder = Platform.isWindows ? 'where.exe' : 'which';
+      final result = await Process.run(finder, [executable]);
       if (result.exitCode != 0) return null;
       for (final line in (result.stdout as String).split('\n')) {
         final path = line.trim();
@@ -664,6 +716,25 @@ class SetupService {
       return null;
     } catch (_) {
       return null;
+    }
+  }
+
+  /// Recursively finds the first file named [name] inside [dir].
+  String? _findBinaryInDir(Directory dir, String name) {
+    try {
+      for (final entity in dir.listSync(recursive: true)) {
+        if (entity is File && p.basename(entity.path) == name) {
+          return entity.path;
+        }
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  /// Makes a file executable on Unix/macOS.
+  Future<void> _setExecutable(String filePath) async {
+    if (!Platform.isWindows) {
+      await Process.run('chmod', ['+x', filePath]);
     }
   }
 
