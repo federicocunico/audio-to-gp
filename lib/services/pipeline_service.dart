@@ -97,19 +97,29 @@ class PipelineService {
     );
 
     Map<String, String>? midiFiles;
+    String? workerGp5Path;
     String? workerError;
+
+    // Log file — captures ALL stdout + stderr so binary garbage doesn't lose data.
+    final logPath = p.join(config.outputDir, 'worker_${config.model}.log');
+    await Directory(config.outputDir).create(recursive: true);
+    final logSink = File(logPath).openWrite();
+    logSink.writeln('=== worker log  ${DateTime.now().toIso8601String()} ===');
+
+    // Use allowMalformed so binary bytes from CUDA/ONNX libs never throw
+    // and kill the stream; they become replacement characters instead.
+    const _utf8 = Utf8Decoder(allowMalformed: true);
 
     // Read stdout as JSON lines
     final stdoutFuture = proc.stdout
-        .transform(utf8.decoder)
+        .transform(_utf8)
         .transform(const LineSplitter())
         .forEach((line) {
+      logSink.writeln('[stdout] $line');
       try {
         final obj = jsonDecode(line) as Map<String, dynamic>;
         final type = obj['type'] as String;
         if (type == 'progress') {
-          // Emitting inline is not possible here; collect for later yield
-          // We use a side-channel list
           _pendingEvents.add(PipelineEvent(
             model: config.model,
             stage: PipelineStage.worker,
@@ -119,6 +129,7 @@ class PipelineService {
           ));
         } else if (type == 'done') {
           midiFiles = Map<String, String>.from(obj['midi_files'] as Map);
+          workerGp5Path = obj['gp5_path'] as String?;
         } else if (type == 'error') {
           workerError = obj['msg'] as String? ?? 'Unknown worker error';
         }
@@ -136,9 +147,10 @@ class PipelineService {
 
     // Stream stderr as log lines
     final stderrFuture = proc.stderr
-        .transform(utf8.decoder)
+        .transform(_utf8)
         .transform(const LineSplitter())
         .forEach((line) {
+      logSink.writeln('[stderr] $line');
       _pendingEvents.add(PipelineEvent(
         model: config.model,
         stage: PipelineStage.worker,
@@ -163,6 +175,8 @@ class PipelineService {
     }
     // Drain any remaining
     await Future.wait([stdoutFuture, stderrFuture]);
+    await logSink.flush();
+    await logSink.close();
     while (_pendingEvents.isNotEmpty) {
       yield _pendingEvents.removeAt(0);
     }
@@ -176,7 +190,7 @@ class PipelineService {
         stage: PipelineStage.worker,
         step: 2,
         pct: 0,
-        message: msg,
+        message: '$msg  (see log: $logPath)',
         isError: true,
       );
       return;
@@ -253,20 +267,23 @@ class PipelineService {
 
     final trackName = p.basenameWithoutExtension(config.inputMp3);
     final gpDir = p.join(config.outputDir, 'guitar_pro');
-    final gpPath = p.join(gpDir, '${trackName}_${config.model}.gp5');
+    final dartGpPath = p.join(gpDir, '${trackName}_${config.model}.gp5');
+    final gpPath = workerGp5Path ?? dartGpPath;
 
-    try {
-      await writeGp5(stemDataList, gpPath, trackName);
-    } catch (e) {
-      yield PipelineEvent(
-        model: config.model,
-        stage: PipelineStage.gp,
-        step: 3,
-        pct: 0,
-        message: 'GP5 write failed: $e',
-        isError: true,
-      );
-      return;
+    if (workerGp5Path == null) {
+      try {
+        await writeGp5(stemDataList, dartGpPath, trackName);
+      } catch (e) {
+        yield PipelineEvent(
+          model: config.model,
+          stage: PipelineStage.gp,
+          step: 3,
+          pct: 0,
+          message: 'GP5 write failed: $e',
+          isError: true,
+        );
+        return;
+      }
     }
 
     final result = PipelineResult(

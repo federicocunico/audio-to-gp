@@ -9,6 +9,8 @@ dependencies = [
     "torch>=2.1,<2.4",
     "torchaudio>=2.1,<2.4",
     "soundfile>=0.12",
+    "setuptools>=65,<71",
+    "PyGuitarPro>=0.11",
 ]
 
 [tool.uv]

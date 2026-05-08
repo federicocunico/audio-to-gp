@@ -1,6 +1,8 @@
 /// Home screen — MP3 file picker + pipeline configuration.
 library;
 
+import 'dart:io';
+
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
@@ -22,6 +24,7 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _runHtdemucsFt = true;
   bool _runHtdemucs6s = true;
   bool _includeDrums = true;
+  bool _uninstalling = false;
   @override
   void initState() {
     super.initState();
@@ -35,6 +38,98 @@ class _HomeScreenState extends State<HomeScreen> {
         _outputDir = p.join(p.dirname(tools.toolsDir), '..', 'output');
       });
     }
+  }
+
+  Future<void> _confirmUninstall() async {
+    final toolsDir = SetupService.instance.paths?.toolsDir ?? '(not found)';
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF16213E),
+        title: const Text(
+          'Uninstall dependencies?',
+          style: TextStyle(color: Colors.white),
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'This will permanently delete all downloaded tools and Python '
+              'packages installed by this app:',
+              style: TextStyle(color: Colors.white70),
+            ),
+            const SizedBox(height: 12),
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: Colors.black26,
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child: Text(
+                toolsDir,
+                style: const TextStyle(
+                  color: Colors.white54,
+                  fontSize: 11,
+                  fontFamily: 'monospace',
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            const Text(
+              'The app will close afterwards. You can reinstall on next launch.',
+              style: TextStyle(color: Colors.white54, fontSize: 12),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child:
+                const Text('Cancel', style: TextStyle(color: Colors.white54)),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.redAccent,
+            ),
+            child: const Text('Uninstall'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true || !mounted) return;
+    setState(() => _uninstalling = true);
+    await SetupService.instance.uninstall();
+
+    if (!mounted) exit(0);
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF16213E),
+        title: const Text(
+          'Uninstall complete',
+          style: TextStyle(color: Colors.white),
+        ),
+        content: const Text(
+          'All tools and packages have been removed.\n\n'
+          'The app will now close. Re-opening it will start the setup wizard again.',
+          style: TextStyle(color: Colors.white70),
+        ),
+        actions: [
+          ElevatedButton(
+            onPressed: () => exit(0),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.redAccent,
+            ),
+            child: const Text('Close app'),
+          ),
+        ],
+      ),
+    );
+    exit(0);
   }
 
   Future<void> _pickMp3() async {
@@ -105,7 +200,27 @@ class _HomeScreenState extends State<HomeScreen> {
           style: TextStyle(color: Colors.white),
         ),
         actions: [
-          if (!hasMuseScore)
+          if (_uninstalling)
+            const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 16),
+              child: Center(
+                child: SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: Colors.redAccent,
+                  ),
+                ),
+              ),
+            )
+          else
+            IconButton(
+              icon: const Icon(Icons.delete_forever, color: Colors.redAccent),
+              tooltip: 'Uninstall — remove downloaded tools & Python packages',
+              onPressed: _confirmUninstall,
+            ),
+          if (!hasMuseScore && !_uninstalling)
             Padding(
               padding: const EdgeInsets.only(right: 12),
               child: Tooltip(

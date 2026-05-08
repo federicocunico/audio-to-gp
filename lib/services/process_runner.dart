@@ -37,11 +37,11 @@ Stream<ProcessLine> runProcess(
   // Stream lines as they arrive — merge stdout + stderr
   yield* _mergeStreams([
     proc.stdout
-        .transform(utf8.decoder)
+        .transform(const Utf8Decoder(allowMalformed: true))
         .transform(const LineSplitter())
         .map((l) => ProcessLine(text: l, isStderr: false)),
     proc.stderr
-        .transform(utf8.decoder)
+        .transform(const Utf8Decoder(allowMalformed: true))
         .transform(const LineSplitter())
         .map((l) => ProcessLine(text: l, isStderr: true)),
   ]);

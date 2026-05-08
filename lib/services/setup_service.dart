@@ -113,6 +113,15 @@ class SetupService {
   // ---- Public API ----------------------------------------------------------
 
   /// Returns true if all required tools are already set up.
+
+  /// Deletes the entire tools directory (Python venv, packages, uv, FFmpeg,
+  /// worker script) and resets cached state.  Call this for "uninstall".
+  Future<void> uninstall() async {
+    final dir = await _toolsDir();
+    final d = Directory(dir);
+    if (d.existsSync()) await d.delete(recursive: true);
+    _paths = null;
+  }
   Future<bool> isSetupComplete() async {
     final manifest = await _readManifest();
     if (manifest == null) return false;
@@ -122,6 +131,19 @@ class SetupService {
     if (!File(paths.uvExe).existsSync()) return false;
     if (!File(paths.pythonExe).existsSync()) return false;
     if (!File(paths.ffmpegExe).existsSync()) return false;
+    // Check the deps marker is current (v4 = setuptools pinned <71 for pkg_resources).
+    // If stale, return false so setup() runs and reinstalls packages.
+    final depsMarker = File(p.join(paths.toolsDir, '.deps_installed'));
+    if (!depsMarker.existsSync()) return false;
+    final markerContent = await depsMarker.readAsString();
+    final cudaAvailable = await _hasCuda();
+    final depsVariant = cudaAvailable ? 'cuda' : 'cpu';
+    if (!markerContent.contains('v5') || !markerContent.contains(depsVariant)) {
+      return false; // setup() will reinstall only the packages (uv/python/ffmpeg skipped)
+    }
+    if (!await _pythonDepsHealthy(paths.pythonExe)) {
+      return false; // force setup() to repair a stale/broken venv
+    }
     _paths = paths;
     return true;
   }
@@ -191,7 +213,7 @@ class SetupService {
             extraEnv: uvPythonEnv);
         yield* _runUv(
           uvExe,
-          ['venv', '--python', '3.11', venvDir],
+          ['venv', '--python', '3.11', '--seed', venvDir],
           SetupStage.python,
           extraEnv: uvPythonEnv,
         );
@@ -221,11 +243,23 @@ class SetupService {
     await File(workerPySrc).copy(workerDest);
 
     // Check if we already installed deps (marker file)
+    // The marker content encodes the install variant so that changing from
+    // onnxruntime → onnxruntime-gpu (or vice-versa) forces a reinstall.
     final depsMarker = File(p.join(toolsDir, '.deps_installed'));
-    if (!depsMarker.existsSync()) {
+    final cudaAvailable = await _hasCuda();
+    final depsVariant = cudaAvailable ? 'cuda' : 'cpu';
+    // v4 marker: setuptools pinned <71 so pkg_resources is available.
+    final markerContent =
+        depsMarker.existsSync() ? await depsMarker.readAsString() : '';
+    final markerOk =
+        markerContent.contains('v5') && markerContent.contains(depsVariant);
+    final depsHealthy = await _pythonDepsHealthy(pythonExe);
+    if (!markerOk || !depsHealthy) {
       yield SetupEvent(
         stage: SetupStage.pythonDeps,
-        message: 'Installing Python dependencies (torch + demucs + basic-pitch)…',
+      message: !markerOk
+        ? 'Installing Python dependencies (torch + demucs + basic-pitch)…'
+        : 'Python environment looks stale — repairing dependencies…',
         pct: 0,
       );
       yield SetupEvent(
@@ -234,8 +268,7 @@ class SetupService {
         pct: 5,
       );
       try {
-        // Detect CUDA at runtime so we install the right PyTorch variant.
-        final cudaAvailable = await _hasCuda();
+        // cudaAvailable / depsVariant already determined above the marker check.
         final torchIndexUrl = cudaAvailable
             ? 'https://download.pytorch.org/whl/cu121'
             : 'https://download.pytorch.org/whl/cpu';
@@ -247,7 +280,25 @@ class SetupService {
           pct: 8,
         );
 
-        // Step A: torch + torchaudio from the correct index.
+        // Step A: setuptools — installed first, isolated, so pkg_resources is
+        // always present before any other package's dist-info is written.
+        // A failed install of basic-pitch or onnxruntime cannot corrupt it.
+        yield SetupEvent(
+          stage: SetupStage.pythonDeps,
+          message: 'Installing setuptools (pkg_resources)…',
+          subPct: 10,
+        );
+        yield* _runUv(
+          uvExe,
+          [
+            'pip', 'install', 'setuptools>=65,<71',
+            '--python', pythonExe,
+          ],
+          SetupStage.pythonDeps,
+          extraEnv: uvPythonEnv,
+        );
+
+        // Step B: torch + torchaudio from the correct index.
         // Using --index-url (not --extra-index-url) so uv fetches torch
         // exclusively from the PyTorch wheel server, avoiding the CPU build
         // on PyPI.
@@ -263,18 +314,42 @@ class SetupService {
           extraEnv: uvPythonEnv,
         );
 
-        // Step B: remaining deps from PyPI (torch already installed above).
+        // Step C: remaining deps from PyPI (torch + setuptools already installed).
+        // basic-pitch is installed WITHOUT the [onnx] extra so we control
+        // which onnxruntime variant (CPU vs GPU) gets installed in step D.
         yield* _runUv(
           uvExe,
           [
             'pip', 'install',
-            'demucs', 'basic-pitch[onnx]', 'soundfile>=0.12',
+            'demucs', 'basic-pitch', 'soundfile>=0.12', 'PyGuitarPro>=0.11',
             '--python', pythonExe,
           ],
           SetupStage.pythonDeps,
           extraEnv: uvPythonEnv,
         );
-        await depsMarker.writeAsString(DateTime.now().toIso8601String());
+
+        // Step D: onnxruntime — GPU build when CUDA is present so basic-pitch
+        // can use CUDAExecutionProvider, CPU build otherwise.
+        // onnxruntime-gpu and onnxruntime are mutually exclusive wheels;
+        // installing the right one here avoids having both.
+        final ortPackage =
+            cudaAvailable ? 'onnxruntime-gpu' : 'onnxruntime';
+        yield SetupEvent(
+          stage: SetupStage.pythonDeps,
+          message: 'Installing $ortPackage for basic-pitch inference…',
+          subPct: 90,
+        );
+        yield* _runUv(
+          uvExe,
+          [
+            'pip', 'install', ortPackage,
+            '--python', pythonExe,
+          ],
+          SetupStage.pythonDeps,
+          extraEnv: uvPythonEnv,
+        );
+        await depsMarker.writeAsString(
+            '${DateTime.now().toIso8601String()} v5 variant=$depsVariant');
       } catch (e) {
         yield SetupEvent(
           stage: SetupStage.pythonDeps,
@@ -292,48 +367,61 @@ class SetupService {
     }
 
     // --- Step 4: FFmpeg ---
-    final ffmpegExe = p.join(toolsDir, 'ffmpeg', 'bin', 'ffmpeg.exe');
-    if (!File(ffmpegExe).existsSync()) {
-      yield SetupEvent(
-        stage: SetupStage.ffmpeg,
-        message: 'Downloading FFmpeg…',
-        pct: 0,
-      );
-      try {
-        yield* _downloadAndExtract(
-          url: _kFfmpegUrl,
-          destDir: p.join(toolsDir, 'ffmpeg_raw'),
-          stage: SetupStage.ffmpeg,
-          label: 'FFmpeg',
-        );
-        // The zip contains a top-level versioned folder; find and move it.
-        await _flattenFfmpegDir(
-          p.join(toolsDir, 'ffmpeg_raw'),
-          p.join(toolsDir, 'ffmpeg'),
-        );
-      } catch (e) {
-        yield SetupEvent(
-          stage: SetupStage.ffmpeg,
-          message: 'FFmpeg download failed: $e',
-          isError: true,
-        );
-        return;
-      }
-    } else {
+    final ffmpegLocal = p.join(toolsDir, 'ffmpeg', 'bin', 'ffmpeg.exe');
+    late final String ffmpegExe;
+
+    if (File(ffmpegLocal).existsSync()) {
+      ffmpegExe = ffmpegLocal;
       yield SetupEvent(
         stage: SetupStage.ffmpeg,
         message: 'FFmpeg already present.',
         pct: 100,
       );
-    }
-
-    if (!File(ffmpegExe).existsSync()) {
-      yield SetupEvent(
-        stage: SetupStage.ffmpeg,
-        message: 'ffmpeg.exe not found after extraction.',
-        isError: true,
-      );
-      return;
+    } else {
+      final pathFfmpeg = await _findInPath('ffmpeg');
+      if (pathFfmpeg != null) {
+        ffmpegExe = pathFfmpeg;
+        yield SetupEvent(
+          stage: SetupStage.ffmpeg,
+          message: 'FFmpeg found in PATH — skipping download.',
+          pct: 100,
+        );
+      } else {
+        yield SetupEvent(
+          stage: SetupStage.ffmpeg,
+          message: 'Downloading FFmpeg…',
+          pct: 0,
+        );
+        try {
+          yield* _downloadAndExtract(
+            url: _kFfmpegUrl,
+            destDir: p.join(toolsDir, 'ffmpeg_raw'),
+            stage: SetupStage.ffmpeg,
+            label: 'FFmpeg',
+          );
+          // The zip contains a top-level versioned folder; find and move it.
+          await _flattenFfmpegDir(
+            p.join(toolsDir, 'ffmpeg_raw'),
+            p.join(toolsDir, 'ffmpeg'),
+          );
+        } catch (e) {
+          yield SetupEvent(
+            stage: SetupStage.ffmpeg,
+            message: 'FFmpeg download failed: $e',
+            isError: true,
+          );
+          return;
+        }
+        if (!File(ffmpegLocal).existsSync()) {
+          yield SetupEvent(
+            stage: SetupStage.ffmpeg,
+            message: 'ffmpeg.exe not found after extraction.',
+            isError: true,
+          );
+          return;
+        }
+        ffmpegExe = ffmpegLocal;
+      }
     }
 
     // --- Step 5: MuseScore (detect only — optional) ---
@@ -342,6 +430,15 @@ class SetupService {
       if (File(candidate).existsSync()) {
         mscorePath = candidate;
         break;
+      }
+    }
+    if (mscorePath == null) {
+      for (final name in ['MuseScore4', 'mscore4', 'MuseScore4.exe', 'mscore4.exe']) {
+        final found = await _findInPath(name);
+        if (found != null) {
+          mscorePath = found;
+          break;
+        }
       }
     }
 
@@ -407,17 +504,29 @@ class SetupService {
       await for (final chunk in response.stream) {
         buffer.add(chunk);
         receivedBytes += chunk.length;
+        final rcvMB = (receivedBytes / 1048576).toStringAsFixed(1);
+
         if (totalBytes > 0) {
-          // Map download phase to subPct 0–49
+          // Known size — show percentage (mapped to 0–49 to leave room for extraction).
           final sp = (receivedBytes / totalBytes * 49).round().clamp(0, 49);
           if (sp != lastSp) {
             lastSp = sp;
-            final rcvMB = (receivedBytes / 1048576).toStringAsFixed(1);
             final totMB = (totalBytes / 1048576).toStringAsFixed(1);
             yield SetupEvent(
               stage: stage,
               message: 'Downloading $label — $rcvMB / $totMB MB',
               subPct: sp,
+            );
+          }
+        } else {
+          // Unknown size — emit every ~5 MB so the UI never appears frozen.
+          final buckMB = (receivedBytes ~/ (5 * 1048576));
+          if (buckMB != lastSp) {
+            lastSp = buckMB;
+            yield SetupEvent(
+              stage: stage,
+              message: 'Downloading $label — $rcvMB MB received…',
+              subPct: null, // indeterminate
             );
           }
         }
@@ -438,6 +547,27 @@ class SetupService {
   Future<bool> _hasCuda() async {
     try {
       final result = await Process.run('nvidia-smi', []);
+      return result.exitCode == 0;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Validate the minimum import set needed by worker.py runtime.
+  Future<bool> _pythonDepsHealthy(String pythonExe) async {
+    if (!File(pythonExe).existsSync()) return false;
+    try {
+      final result = await Process.run(
+        pythonExe,
+        [
+          '-c',
+          'import onnxruntime, basic_pitch, pretty_midi, guitarpro; print("ok")',
+        ],
+        environment: {
+          ...Platform.environment,
+          'PYTHONUTF8': '1',
+        },
+      );
       return result.exitCode == 0;
     } catch (_) {
       return false;
@@ -518,6 +648,22 @@ class SetupService {
     final exitCode = await exitCompleter.future;
     if (exitCode != 0) {
       throw Exception('uv ${args.join(' ')} exited with $exitCode');
+    }
+  }
+
+  /// Returns the full resolved path to [executable] if it exists on the
+  /// system PATH (via `where.exe`), or null if not found.
+  Future<String?> _findInPath(String executable) async {
+    try {
+      final result = await Process.run('where.exe', [executable]);
+      if (result.exitCode != 0) return null;
+      for (final line in (result.stdout as String).split('\n')) {
+        final path = line.trim();
+        if (path.isNotEmpty && File(path).existsSync()) return path;
+      }
+      return null;
+    } catch (_) {
+      return null;
     }
   }
 

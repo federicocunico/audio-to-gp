@@ -59,11 +59,31 @@ class _AppRouterState extends State<_AppRouter> {
     await _precacheAssets();
 
     final complete = await SetupService.instance.isSetupComplete();
+    if (complete) {
+      // Always refresh worker.py from the bundle so code updates take effect
+      // without requiring a full reinstall.
+      await _refreshWorker();
+    }
     if (mounted) {
       setState(() {
         _needsSetup = !complete;
         _checking = false;
       });
+    }
+  }
+
+  /// Copy the freshly-extracted worker.py to the tools dir so the pipeline
+  /// always runs the latest version bundled in this release.
+  Future<void> _refreshWorker() async {
+    final paths = SetupService.instance.paths;
+    if (paths == null) return;
+    try {
+      final appSupport = await getApplicationSupportDirectory();
+      final src = File(
+          p.join(appSupport.path, 'audio-to-gp', 'assets', 'worker.py'));
+      if (src.existsSync()) await src.copy(paths.workerPy);
+    } catch (e) {
+      debugPrint('Worker refresh warning: $e');
     }
   }
 
@@ -80,12 +100,11 @@ class _AppRouterState extends State<_AppRouter> {
         'assets/python/pyproject.toml',
       ]) {
         final destFile = File(p.join(assetDir, p.basename(assetKey)));
-        if (!destFile.existsSync()) {
-          final data = await rootBundle.load(assetKey);
-          await destFile.writeAsBytes(
-            data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes),
-          );
-        }
+        // Always overwrite so updates bundled in a new release are applied.
+        final data = await rootBundle.load(assetKey);
+        await destFile.writeAsBytes(
+          data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes),
+        );
       }
     } catch (e) {
       debugPrint('Asset precache warning: $e');

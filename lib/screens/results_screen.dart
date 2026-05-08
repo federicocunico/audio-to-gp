@@ -4,6 +4,7 @@ library;
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 
 import '../models/pipeline_models.dart';
@@ -258,25 +259,52 @@ class _ModelResultCardState extends State<_ModelResultCard> {
           ],
 
           // Log expander
-          InkWell(
-            onTap: () => setState(() => _logExpanded = !_logExpanded),
-            child: Padding(
-              padding: const EdgeInsets.all(12),
-              child: Row(
-                children: [
-                  Icon(
-                    _logExpanded ? Icons.expand_less : Icons.expand_more,
-                    color: Colors.white38,
-                    size: 18,
+          Row(
+            children: [
+              Expanded(
+                child: InkWell(
+                  onTap: () => setState(() => _logExpanded = !_logExpanded),
+                  child: Padding(
+                    padding: const EdgeInsets.all(12),
+                    child: Row(
+                      children: [
+                        Icon(
+                          _logExpanded ? Icons.expand_less : Icons.expand_more,
+                          color: Colors.white38,
+                          size: 18,
+                        ),
+                        const SizedBox(width: 6),
+                        Text(
+                          'Log (${widget.log.length} lines)',
+                          style: const TextStyle(
+                              color: Colors.white38, fontSize: 12),
+                        ),
+                      ],
+                    ),
                   ),
-                  const SizedBox(width: 6),
-                  Text(
-                    'Log (${widget.log.length} lines)',
-                    style: const TextStyle(color: Colors.white38, fontSize: 12),
-                  ),
-                ],
+                ),
               ),
-            ),
+              if (widget.log.isNotEmpty)
+                IconButton(
+                  icon: const Icon(Icons.copy,
+                      size: 14, color: Colors.white38),
+                  tooltip: 'Copy logs to clipboard',
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  onPressed: () async {
+                    final text =
+                        widget.log.map((e) => e.message).join('\n');
+                    await Clipboard.setData(ClipboardData(text: text));
+                    if (context.mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text('Logs copied to clipboard'),
+                          duration: Duration(seconds: 2),
+                        ),
+                      );
+                    }
+                  },
+                ),
+            ],
           ),
 
           if (_logExpanded)
