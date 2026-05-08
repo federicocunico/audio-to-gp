@@ -1,0 +1,52 @@
+name: Build and Release (Windows)
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Build Windows release
+        run: flutter build windows --release
+
+      - name: Get version from pubspec.yaml
+        id: version
+        shell: pwsh
+        run: |
+          $version = (Get-Content pubspec.yaml | Select-String "^version:").ToString() -replace "version:\s*", "" -replace "\+.*", ""
+          $version = $version.Trim()
+          echo "VERSION=$version" >> $env:GITHUB_OUTPUT
+          echo "Extracted version: $version"
+
+      - name: Package artifacts
+        shell: pwsh
+        run: |
+          $dest = "audio-to-gp-windows-${{ github.ref_name }}.zip"
+          Compress-Archive -Path "build\windows\x64\runner\Release\*" -DestinationPath $dest
+          echo "Created archive: $dest"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Release ${{ github.ref_name }}"
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: audio-to-gp-windows-${{ github.ref_name }}.zip
