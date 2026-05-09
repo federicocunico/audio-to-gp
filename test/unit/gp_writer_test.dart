@@ -4,7 +4,6 @@
 library;
 
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:audio_to_gp_flutter/services/gp_writer.dart';

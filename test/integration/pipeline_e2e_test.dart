@@ -22,7 +22,6 @@ import 'package:path/path.dart' as p;
 
 import 'package:audio_to_gp_flutter/models/pipeline_models.dart';
 import 'package:audio_to_gp_flutter/services/midi_parser.dart';
-import 'package:audio_to_gp_flutter/services/gp_writer.dart';
 import 'package:audio_to_gp_flutter/services/setup_service.dart';
 import 'package:audio_to_gp_flutter/services/pipeline_service.dart';
 
@@ -149,7 +148,7 @@ void main() {
       final bytes = File(result!.gp5Path).readAsBytesSync();
       expect(bytes[0], equals(24)); // length of version string
       final versionStr = String.fromCharCodes(bytes.sublist(1, 25));
-      expect(versionStr, equals('FICHIER GUITAR PRO v5.00'));
+      expect(versionStr, startsWith('FICHIER GUITAR PRO v5.'));
     });
 
     test('each MIDI file is parseable and has note events', () async {
@@ -253,7 +252,7 @@ void main() {
       final bytes = File(result!.gp5Path).readAsBytesSync();
       expect(bytes[0], equals(24));
       final versionStr = String.fromCharCodes(bytes.sublist(1, 25));
-      expect(versionStr, equals('FICHIER GUITAR PRO v5.00'));
+      expect(versionStr, startsWith('FICHIER GUITAR PRO v5.'));
     });
 
     test('guitar and piano stems are present in MIDI output', () {

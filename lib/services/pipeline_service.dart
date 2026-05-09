@@ -110,11 +110,11 @@ class PipelineService {
 
     // Use allowMalformed so binary bytes from CUDA/ONNX libs never throw
     // and kill the stream; they become replacement characters instead.
-    const _utf8 = Utf8Decoder(allowMalformed: true);
+    const utf8Lenient = Utf8Decoder(allowMalformed: true);
 
     // Read stdout as JSON lines
     final stdoutFuture = proc.stdout
-        .transform(_utf8)
+        .transform(utf8Lenient)
         .transform(const LineSplitter())
         .forEach((line) {
       logSink.writeln('[stdout] $line');
@@ -149,7 +149,7 @@ class PipelineService {
 
     // Stream stderr as log lines
     final stderrFuture = proc.stderr
-        .transform(_utf8)
+        .transform(utf8Lenient)
         .transform(const LineSplitter())
         .forEach((line) {
       logSink.writeln('[stderr] $line');

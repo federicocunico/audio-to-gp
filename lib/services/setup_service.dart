@@ -7,6 +7,7 @@ library;
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:archive/archive_io.dart';
 import 'package:http/http.dart' as http;
@@ -147,7 +148,41 @@ class SetupService {
     if (d.existsSync()) await d.delete(recursive: true);
     _paths = null;
   }
+
+  /// Build ToolPaths from env vars (for CI / flutter test environments where
+  /// path_provider may not be available).
+  ///
+  /// Required env vars: AUDIO_TO_GP_TOOLS_DIR, PYTHON_EXE, UV_EXE, FFMPEG_EXE
+  ToolPaths? _pathsFromEnv() {
+    final toolsDir = Platform.environment['AUDIO_TO_GP_TOOLS_DIR'];
+    final pythonExe = Platform.environment['PYTHON_EXE'];
+    final uvExe = Platform.environment['UV_EXE'];
+    final ffmpegExe = Platform.environment['FFMPEG_EXE'];
+    if (toolsDir == null || pythonExe == null || uvExe == null || ffmpegExe == null) {
+      return null;
+    }
+    return ToolPaths(
+      uvExe: uvExe,
+      pythonExe: pythonExe,
+      ffmpegExe: ffmpegExe,
+      workerPy: p.join(toolsDir, 'worker.py'),
+      toolsDir: toolsDir,
+    );
+  }
+
   Future<bool> isSetupComplete() async {
+    // Env var override: used in CI and flutter test (where path_provider is unavailable).
+    final envPaths = _pathsFromEnv();
+    if (envPaths != null) {
+      if (!File(envPaths.uvExe).existsSync()) return false;
+      if (!File(envPaths.pythonExe).existsSync()) return false;
+      if (!File(envPaths.ffmpegExe).existsSync()) return false;
+      if (!File(envPaths.workerPy).existsSync()) return false;
+      if (!await _pythonDepsHealthy(envPaths.pythonExe)) return false;
+      _paths = envPaths;
+      return true;
+    }
+
     final manifest = await _readManifest();
     if (manifest == null) return false;
     final paths = _pathsFromManifest(manifest);
@@ -690,11 +725,11 @@ class SetupService {
     process.exitCode.then(exitCompleter.complete);
 
     while (!exitCompleter.isCompleted) {
-      while (pending.isNotEmpty) yield pending.removeAt(0);
+      while (pending.isNotEmpty) { yield pending.removeAt(0); }
       await Future<void>.delayed(const Duration(milliseconds: 50));
     }
     await Future.wait([stdoutFuture, stderrFuture]);
-    while (pending.isNotEmpty) yield pending.removeAt(0);
+    while (pending.isNotEmpty) { yield pending.removeAt(0); }
 
     final exitCode = await exitCompleter.future;
     if (exitCode != 0) {
