@@ -478,7 +478,7 @@ def step3_guitar_pro(
                     used_strs.add(s_num)
                     note = gp.Note(
                         beat=beat, string=s_num, value=fret,
-                        velocity=_snap_vel(vel), type=gp.NoteType.normal,
+                        velocity=90, type=gp.NoteType.normal,
                     )
                     beat.notes.append(note)
 
@@ -547,7 +547,7 @@ def main() -> None:
         _error(0, f"Input file not found: {input_mp3}")
 
     stems_dir = output_dir / "stems"
-    midi_dir  = output_dir / "midi"
+    midi_dir  = output_dir / "midi" / model
     stems_dir.mkdir(parents=True, exist_ok=True)
     midi_dir.mkdir(parents=True, exist_ok=True)
 

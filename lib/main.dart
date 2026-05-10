@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -72,8 +73,8 @@ class _AppRouterState extends State<_AppRouter> {
     }
   }
 
-  /// Copy the freshly-extracted worker.py to the tools dir so the pipeline
-  /// always runs the latest version bundled in this release.
+  /// Copy worker.py from the app-support staging dir to the tools dir,
+  /// but only when the source is newer or has a different size.
   Future<void> _refreshWorker() async {
     final paths = SetupService.instance.paths;
     if (paths == null) return;
@@ -81,14 +82,22 @@ class _AppRouterState extends State<_AppRouter> {
       final appSupport = await getApplicationSupportDirectory();
       final src = File(
           p.join(appSupport.path, 'audio-to-gp', 'assets', 'worker.py'));
-      if (src.existsSync()) await src.copy(paths.workerPy);
+      if (!src.existsSync()) return;
+      final dst = File(paths.workerPy);
+      if (!dst.existsSync() ||
+          src.lengthSync() != dst.lengthSync() ||
+          src.lastModifiedSync().isAfter(dst.lastModifiedSync())) {
+        await src.copy(paths.workerPy);
+        debugPrint('worker.py refreshed from bundle');
+      }
     } catch (e) {
       debugPrint('Worker refresh warning: $e');
     }
   }
 
-  /// Extract Flutter asset bytes to the app support dir so they are
-  /// accessible as regular files (required for uv pyproject.toml install).
+  /// Extract Flutter asset bytes to the app-support staging dir.
+  /// Files are only written when their content has changed, which preserves
+  /// the modification time so _refreshWorker() can detect updates correctly.
   Future<void> _precacheAssets() async {
     try {
       final appSupport = await getApplicationSupportDirectory();
@@ -100,15 +109,27 @@ class _AppRouterState extends State<_AppRouter> {
         'assets/python/pyproject.toml',
       ]) {
         final destFile = File(p.join(assetDir, p.basename(assetKey)));
-        // Always overwrite so updates bundled in a new release are applied.
         final data = await rootBundle.load(assetKey);
-        await destFile.writeAsBytes(
-          data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes),
-        );
+        final newBytes =
+            data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes);
+        // Only write when content differs so mtime reflects a real update.
+        if (!destFile.existsSync() ||
+            !_bytesEqual(newBytes, await destFile.readAsBytes())) {
+          await destFile.writeAsBytes(newBytes);
+        }
       }
     } catch (e) {
       debugPrint('Asset precache warning: $e');
     }
+  }
+
+  /// Byte-level equality check used to avoid unnecessary asset writes.
+  bool _bytesEqual(Uint8List a, Uint8List b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
   }
 
   @override

@@ -494,7 +494,7 @@ void _writeBeat(_Gp5Buffer buf, _Beat beat, StemInstrumentConfig cfg) {
     int nFlags = 0x20; // velocity present
     buf.writeByte(nFlags);
     buf.writeByte(0x01); // note type: normal (fretted)
-    buf.writeByte(velocity & 0x7F); // dynamic/velocity (1–15 in GP5 range, we clip)
+    buf.writeByte(3); // GP5 dynamic: 3 = forte (f)
     buf.writeInt32(fret); // fret value
     buf.writeByte(0); // finger left
     buf.writeByte(0); // finger right
